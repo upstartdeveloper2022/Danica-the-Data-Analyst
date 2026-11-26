@@ -11,7 +11,7 @@ from data_profiler import profile_dataset
 from diagnostics_engine import run_root_cause_diagnostics
 from forecast_engine import generate_metric_forecast
 from kpi_engine import identify_and_compute_kpis
-from summary_engine import build_executive_brief
+from summary_engine import _add_sanitized_runs, build_executive_brief
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_CSV = PROJECT_ROOT / "sample_data" / "operations_sample.csv"
@@ -70,3 +70,31 @@ def test_build_executive_brief_docx_and_pptx_end_to_end():
     assert prs.slides[3].shapes.title.text == "Short-Term Outlook"
     assert _count_pictures(prs.slides[3]) == 1
     assert prs.slides[4].shapes.title.text == "Data Readiness & Analyst Caveats"
+
+
+def test_sanitized_docx_runs_and_section_three_fallback():
+    doc = Document()
+    paragraph = doc.add_paragraph()
+    _add_sanitized_runs(paragraph, "**First\n\nline** and __second line__", max_len=60)
+    assert paragraph.text == "First line and second line"
+    assert paragraph.runs[0].bold is True
+    assert paragraph.runs[-1].bold is True
+
+    brief = build_executive_brief(
+        source_name="dataset.csv",
+        profile={
+            "row_count": 1,
+            "col_count": 1,
+            "duplicate_rows": 0,
+            "readiness_notes": [],
+        },
+        kpi_result={"kpis": [], "notes": []},
+        diagnostics={"findings": ["**Long\n\nprose** " + "detail " * 60]},
+        chart_bundle=None,
+    )
+    output_doc = Document(BytesIO(brief["docx_bytes"]))
+    text = "\n".join(paragraph.text for paragraph in output_doc.paragraphs)
+    assert "**" not in text
+    assert "\n\n" not in text
+    assert "Top Segment Breakdown chart is unavailable" in text
+    assert len(output_doc.inline_shapes) == 0
