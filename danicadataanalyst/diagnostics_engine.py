@@ -1,9 +1,74 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+
+def sanitize_label(
+    value: Any,
+    max_len: int = 60,
+    fallback: str = "Unknown",
+) -> str:
+    """Collapse whitespace and Markdown markers, then shorten a display label."""
+    text = re.sub(
+        r"\s+",
+        " ",
+        "" if value is None else str(value),
+    ).replace("**", "").replace("__", "").strip()
+    if not text:
+        return fallback
+    if len(text) <= max_len:
+        return text
+
+    if max_len <= 3:
+        return text[:max_len]
+    prefix = text[: max_len - 3].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    if not prefix:
+        prefix = text[: max_len - 3].rstrip()
+    return f"{prefix}..."
+
+
+def is_free_text_column(series: pd.Series) -> bool:
+    """Identify prose-like text using length, multiline, and uniqueness signals."""
+    values = series.dropna().astype(str)
+    if values.empty:
+        return False
+
+    average_length = float(values.str.len().mean())
+    multiline_ratio = float(values.str.contains(r"[\r\n]", regex=True).mean())
+    uniqueness_ratio = float(values.nunique(dropna=True) / len(values))
+
+    return (
+        average_length >= 60
+        or (multiline_ratio >= 0.10 and average_length >= 20)
+        or (uniqueness_ratio >= 0.80 and average_length >= 25)
+        or (uniqueness_ratio >= 0.50 and average_length >= 40)
+    )
+
+
+def is_identifier_column(series: pd.Series, column_name: str) -> bool:
+    """Identify named ID/hash fields and highly unique opaque string keys."""
+    normalized = re.sub(r"[^a-z0-9]+", "_", column_name.lower()).strip("_")
+    tokens = set(normalized.split("_"))
+    if tokens & {"id", "uuid", "guid", "hash", "identifier"}:
+        return True
+
+    values = series.dropna().astype(str)
+    if len(values) < 10:
+        return False
+    unique_count = int(values.nunique(dropna=True))
+    uniqueness_ratio = float(unique_count / len(values))
+    average_length = float(values.str.len().mean())
+    if uniqueness_ratio >= 0.98 and average_length >= 8:
+        return True
+    return (
+        bool(tokens & {"group", "code", "key"})
+        and unique_count >= 100
+        and uniqueness_ratio >= 0.10
+    )
 
 
 def _is_rate_metric(col_name: str, series: pd.Series) -> bool:
@@ -55,8 +120,8 @@ def _analyze_segment_drivers(
             top = grouped.iloc[0]
             drivers.append(
                 {
-                    "dimension": cat_col,
-                    "top_segment": str(top["segment"]),
+                    "dimension": sanitize_label(cat_col),
+                    "top_segment": sanitize_label(top["segment"]),
                     "record_count": int(top["count"]),
                     "segment_value": round(float(top["mean"]), 2),
                     "overall_baseline": round(overall_mean, 2),
@@ -71,8 +136,8 @@ def _analyze_segment_drivers(
             top = grouped.iloc[0]
             drivers.append(
                 {
-                    "dimension": cat_col,
-                    "top_segment": str(top["segment"]),
+                    "dimension": sanitize_label(cat_col),
+                    "top_segment": sanitize_label(top["segment"]),
                     "record_count": int(top["count"]),
                     "segment_value": round(float(top["sum"]), 2),
                     "overall_baseline": round(overall_total, 2),
@@ -133,8 +198,8 @@ def _analyze_period_movers(
         row = combined.loc[top_idx]
         movers.append(
             {
-                "dimension": cat_col,
-                "segment": str(top_idx),
+                "dimension": sanitize_label(cat_col),
+                "segment": sanitize_label(top_idx),
                 "comparison": f"{curr_p} vs. {prev_p}",
                 "previous": round(float(row["prev"]), 2),
                 "current": round(float(row["curr"]), 2),
@@ -215,6 +280,14 @@ def run_root_cause_diagnostics(
                 or pd.api.types.is_string_dtype(df[col])
                 or isinstance(df[col].dtype, pd.CategoricalDtype)
             )
+            and not is_free_text_column(df[col])
+            and not is_identifier_column(df[col], str(col))
+        ]
+    else:
+        category_cols = [
+            col
+            for col in category_cols
+            if col in df.columns and not is_free_text_column(df[col])
         ]
 
     is_rate = _is_rate_metric(metric_col, series)
@@ -227,21 +300,21 @@ def run_root_cause_diagnostics(
     findings: list[str] = []
     for drv in drivers:
         findings.append(
-            f"By **{drv['dimension']}**, **{drv['top_segment']}** leads with "
+            f"By {drv['dimension']}, {drv['top_segment']} leads with "
             f"{drv['segment_value']:,} ({drv['impact_metric']})."
         )
     for mov in movers:
         pct_txt = f" ({mov['pct_change']:+.1f}%)" if mov["pct_change"] is not None else ""
         findings.append(
-            f"Largest recent shift in **{mov['dimension']}**: **{mov['segment']}** changed by "
+            f"Largest recent shift in {mov['dimension']}: {mov['segment']} changed by "
             f"{mov['delta']:+.2f}{pct_txt} ({mov['comparison']})."
         )
     if not outliers_df.empty:
         findings.append(
-            f"Detected **{len(outliers_df)} statistical outlier row(s)** for `{metric_col}` using the 1.5×IQR rule."
+            f"Detected {len(outliers_df)} statistical outlier row(s) for {metric_col} using the 1.5×IQR rule."
         )
     else:
-        findings.append(f"No extreme statistical outliers detected for `{metric_col}` (1.5×IQR rule).")
+        findings.append(f"No extreme statistical outliers detected for {metric_col} (1.5×IQR rule).")
 
     if len(df) < 25:
         findings.append(
