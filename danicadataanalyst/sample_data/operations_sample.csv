@@ -1,0 +1,19 @@
+date,department,region,tickets_received,avg_handle_time_min,operational_cost_usd,sla_met_pct
+2026-01-05,Claims Review,Northeast,420,18.4,14200,91.2
+2026-01-05,Member Support,Southeast,610,11.2,11850,94.8
+2026-01-05,Provider Billing,Midwest,295,22.6,12900,88.5
+2026-01-12,Claims Review,Northeast,445,19.1,14850,90.4
+2026-01-12,Member Support,Southeast,640,11.5,12200,94.1
+2026-01-12,Provider Billing,Midwest,310,23.8,13600,87.1
+2026-01-19,Claims Review,Northeast,490,21.0,16100,88.9
+2026-01-19,Member Support,Southeast,595,10.9,11500,95.3
+2026-01-19,Provider Billing,Midwest,340,25.2,14950,85.4
+2026-01-26,Claims Review,Northeast,515,22.4,17250,87.6
+2026-01-26,Member Support,Southeast,625,11.1,11900,94.9
+2026-01-26,Provider Billing,Midwest,355,26.1,15700,84.2
+2026-02-02,Claims Review,Northeast,470,19.8,15400,90.1
+2026-02-02,Member Support,Southeast,655,11.4,12450,94.5
+2026-02-02,Provider Billing,Midwest,325,23.1,13950,87.9
+2026-02-09,Claims Review,Northeast,460,18.9,14900,91.5
+2026-02-09,Member Support,Southeast,630,11.0,12050,95.1
+2026-02-09,Provider Billing,Midwest,318,22.0,13400,88.8
