@@ -9,7 +9,11 @@ import summary_engine
 from chart_engine import generate_milestone3_charts
 from data_loader import DataLoadError, load_dataset
 from data_profiler import profile_dataset
-from diagnostics_engine import run_root_cause_diagnostics
+from diagnostics_engine import (
+    is_free_text_column,
+    is_identifier_column,
+    run_root_cause_diagnostics,
+)
 from forecast_engine import generate_metric_forecast
 from kpi_engine import identify_and_compute_kpis
 
@@ -107,6 +111,8 @@ categorical_cols = [
     col_info["column"]
     for col_info in profile["columns"]
     if col_info["type"] == "categorical"
+    and not is_free_text_column(df[col_info["column"]])
+    and not is_identifier_column(df[col_info["column"]], col_info["column"])
 ]
 
 selected_metric = None
@@ -267,4 +273,22 @@ if profile["numeric_summary"]:
     st.dataframe(pd.DataFrame(profile["numeric_summary"]).T, use_container_width=True)
 
 st.markdown("### Data Preview (First 15 Rows)")
-st.dataframe(df.head(15), use_container_width=True)
+preview = df.head(15)
+preview_column_config = {
+    col: st.column_config.TextColumn(str(col), width="large")
+    for col in preview.columns
+    if (
+        pd.api.types.is_object_dtype(df[col])
+        or pd.api.types.is_string_dtype(df[col])
+    )
+    and (
+        str(col).lower() in {"prompt_hash", "text", "description", "comment"}
+        or float(df[col].dropna().astype(str).str.len().mean() or 0) >= 32
+    )
+}
+st.dataframe(
+    preview,
+    column_order=list(preview.columns),
+    column_config=preview_column_config,
+    use_container_width=True,
+)
