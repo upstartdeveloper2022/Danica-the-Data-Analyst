@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import re
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from docx import Document
@@ -12,11 +16,13 @@ from pptx import Presentation
 from pptx.dml.color import RGBColor as PptxRGBColor
 from pptx.util import Inches, Pt
 
+from diagnostics_engine import sanitize_label
+
 
 def _strip_markdown(text: str) -> str:
     """Normalize Markdown markers and special punctuation into clean deliverable text."""
     return (
-        text.replace("**", "")
+        sanitize_label(text, max_len=10000)
         .replace("`", "")
         .replace("—", "-")
         .replace("–", "-")
@@ -24,18 +30,85 @@ def _strip_markdown(text: str) -> str:
     )
 
 
+def _add_sanitized_runs(paragraph: Any, value: str, max_len: int = 180) -> None:
+    """Render sanitized text while preserving paired Markdown bold as run formatting."""
+    normalized = re.sub(r"\s+", " ", "" if value is None else str(value)).strip()
+    parts = re.split(r"(\*\*.*?\*\*|__.*?__)", normalized)
+    annotated: list[tuple[str, bool]] = []
+    for part in parts:
+        bold = (part.startswith("**") and part.endswith("**")) or (
+            part.startswith("__") and part.endswith("__")
+        )
+        content = part[2:-2] if bold else part
+        content = content.replace("**", "").replace("__", "")
+        for char in content:
+            if char.isspace():
+                if annotated and annotated[-1][0] != " ":
+                    annotated.append((" ", bold))
+            else:
+                annotated.append((char, bold))
+
+    while annotated and annotated[0][0] == " ":
+        annotated.pop(0)
+    while annotated and annotated[-1][0] == " ":
+        annotated.pop()
+
+    plain_text = "".join(char for char, _ in annotated)
+    clean_text = sanitize_label(plain_text, max_len=max_len, fallback="")
+    if not clean_text:
+        clean_text = "Unknown"
+        paragraph.add_run(clean_text).bold = False
+        return
+
+    truncated = clean_text.endswith("...") and len(plain_text) > len(clean_text)
+    content_length = len(clean_text) - 3 if truncated else len(clean_text)
+    visible = annotated[:content_length]
+
+    start = 0
+    while start < len(visible):
+        bold = visible[start][1]
+        end = start + 1
+        while end < len(visible) and visible[end][1] == bold:
+            end += 1
+        run = paragraph.add_run("".join(char for char, _ in visible[start:end]))
+        run.bold = bold
+        start = end
+    if truncated:
+        paragraph.add_run("...").bold = False
+
+
+def _add_chart_image(doc: Any, caption: str, image_bytes: bytes) -> bool:
+    """Save a chart temporarily and embed it only after confirming a non-empty image file."""
+    caption_p = doc.add_paragraph()
+    caption_run = caption_p.add_run(sanitize_label(caption))
+    caption_run.bold = True
+    caption_run.font.size = DocxPt(10)
+
+    with TemporaryDirectory() as temp_dir:
+        image_path = Path(temp_dir) / "chart.png"
+        image_path.write_bytes(image_bytes)
+        if not image_path.is_file() or image_path.stat().st_size == 0:
+            return False
+        doc.add_picture(str(image_path), width=DocxInches(6.2))
+    return True
+
+
 def _add_bullet_slide(prs: Presentation, title: str, bullets: list[str]) -> None:
     """Add a clean full-width title-and-bullets slide to the PowerPoint presentation."""
     slide_layout = prs.slide_layouts[1]
     slide = prs.slides.add_slide(slide_layout)
-    slide.shapes.title.text = _strip_markdown(title)
+    slide.shapes.title.text = sanitize_label(title)
 
     body = slide.placeholders[1]
     tf = body.text_frame
     tf.clear()
     tf.word_wrap = True
 
-    clean_bullets = [_strip_markdown(b).strip() for b in bullets if b and b.strip()]
+    clean_bullets = [
+        sanitize_label(b, max_len=160)
+        for b in bullets
+        if b and str(b).strip()
+    ]
     if not clean_bullets:
         clean_bullets = ["No items available for this section."]
 
@@ -61,14 +134,18 @@ def _add_split_slide(
     # Use Title Only layout (index 5) so we can position text box and chart cleanly
     slide_layout = prs.slide_layouts[5]
     slide = prs.slides.add_slide(slide_layout)
-    slide.shapes.title.text = _strip_markdown(title)
+    slide.shapes.title.text = sanitize_label(title)
 
     # Left column: concise takeaway bullets
     left_box = slide.shapes.add_textbox(Inches(0.65), Inches(1.55), Inches(5.35), Inches(5.3))
     tf = left_box.text_frame
     tf.word_wrap = True
 
-    clean_bullets = [_strip_markdown(b).strip() for b in bullets if b and b.strip()]
+    clean_bullets = [
+        sanitize_label(b, max_len=150)
+        for b in bullets
+        if b and str(b).strip()
+    ]
     if not clean_bullets:
         clean_bullets = ["No items available for this section."]
 
@@ -126,11 +203,18 @@ def _render_plotly_png(
         except Exception:
             import kaleido
 
-            buf = BytesIO()
-            kaleido.write_fig(clean_fig, buf, format="png", width=width, height=height, scale=2)
-            data = buf.getvalue()
-            if data:
-                return data
+            with TemporaryDirectory() as temp_dir:
+                image_path = Path(temp_dir) / "chart.png"
+                asyncio.run(
+                    kaleido.write_fig(
+                        clean_fig,
+                        path=image_path,
+                        opts={"format": "png", "width": width, "height": height, "scale": 2},
+                        cancel_on_error=True,
+                    )
+                )
+                if image_path.is_file() and image_path.stat().st_size:
+                    return image_path.read_bytes()
     except Exception:
         return None
     return None
@@ -169,7 +253,8 @@ def _build_docx_brief(
     # 1. Executive Highlights
     doc.add_heading("1. Executive Highlights", level=1)
     for bullet in headline_bullets:
-        p = doc.add_paragraph(_strip_markdown(bullet), style="List Bullet")
+        p = doc.add_paragraph(style="List Bullet")
+        _add_sanitized_runs(p, bullet)
         p.paragraph_format.space_after = DocxPt(4)
 
     # 2. KPI Summary Table
@@ -190,8 +275,8 @@ def _build_docx_brief(
             delta_str = "N/A"
             if kpi.get("delta") and kpi["delta"].get("pct_change") is not None:
                 delta_str = f"{kpi['delta']['pct_change']:+.1f}%"
-            row_cells[0].text = _strip_markdown(kpi["label"])
-            row_cells[1].text = str(kpi["aggregation"])
+            row_cells[0].text = sanitize_label(kpi["label"])
+            row_cells[1].text = sanitize_label(kpi["aggregation"])
             row_cells[2].text = f"{kpi['primary_value']:,}"
             row_cells[3].text = delta_str
             row_cells[4].text = f"{kpi['min']:,} - {kpi['max']:,}"
@@ -199,39 +284,40 @@ def _build_docx_brief(
         doc.add_paragraph()
 
     # 3. Key Visuals (up to 2 charts: trend + segment breakdown)
-    chart_images: list[tuple[str, bytes]] = []
+    doc.add_heading("3. Visual Performance Snapshot", level=1)
     if trend_png:
-        chart_images.append(("Performance Trend Over Time", trend_png))
-    if breakdown_png and len(chart_images) < 2:
-        chart_images.append(("Top Segment Breakdown", breakdown_png))
+        if not _add_chart_image(doc, "Performance Trend Over Time", trend_png):
+            doc.add_paragraph("Performance trend chart could not be saved; no image was embedded.")
+    else:
+        doc.add_paragraph("Performance trend chart is unavailable for this dataset.")
 
-    if chart_images:
-        doc.add_heading("3. Visual Performance Snapshot", level=1)
-        for caption, img_bytes in chart_images[:2]:
-            cap_p = doc.add_paragraph()
-            cap_run = cap_p.add_run(caption)
-            cap_run.bold = True
-            cap_run.font.size = DocxPt(10)
-            doc.add_picture(BytesIO(img_bytes), width=DocxInches(6.2))
+    if breakdown_png:
+        if not _add_chart_image(doc, "Top Segment Breakdown", breakdown_png):
+            doc.add_paragraph("Top Segment Breakdown chart could not be saved; no image was embedded.")
+    else:
+        doc.add_paragraph("Top Segment Breakdown chart is unavailable for this dataset.")
 
     # 4. Root-Cause & Segment Drivers
     if driver_bullets:
         doc.add_heading("4. Root-Cause & Segment Drivers", level=1)
         for bullet in driver_bullets:
-            p = doc.add_paragraph(_strip_markdown(bullet), style="List Bullet")
+            p = doc.add_paragraph(style="List Bullet")
+            _add_sanitized_runs(p, bullet)
             p.paragraph_format.space_after = DocxPt(4)
 
     # 5. Short-Term Outlook
     if forecast_bullets:
         doc.add_heading("5. Short-Term Outlook", level=1)
         for bullet in forecast_bullets:
-            p = doc.add_paragraph(_strip_markdown(bullet), style="List Bullet")
+            p = doc.add_paragraph(style="List Bullet")
+            _add_sanitized_runs(p, bullet)
             p.paragraph_format.space_after = DocxPt(4)
 
     # 6. Data Readiness & Analyst Caveats
     doc.add_heading("6. Data Readiness & Analyst Caveats", level=1)
     for caveat in caveat_bullets or ["No critical data readiness caveats flagged."]:
-        p = doc.add_paragraph(_strip_markdown(caveat), style="List Bullet")
+        p = doc.add_paragraph(style="List Bullet")
+        _add_sanitized_runs(p, caveat)
         p.paragraph_format.space_after = DocxPt(4)
 
     docx_buffer = BytesIO()
@@ -249,7 +335,7 @@ def build_executive_brief(
     focus_metric: str | None = None,
 ) -> dict[str, Any]:
     """Assemble structured executive summary bullets, a .docx brief, and a visual .pptx stakeholder deck."""
-    clean_source = _strip_markdown(source_name or "dataset")
+    clean_source = sanitize_label(source_name or "dataset", max_len=60, fallback="dataset")
 
     headline_bullets: list[str] = [
         f"Dataset {clean_source} contains {profile['row_count']:,} rows across {profile['col_count']} columns ({profile['duplicate_rows']} duplicate rows)."
@@ -260,12 +346,16 @@ def build_executive_brief(
         if kpi.get("delta") and kpi["delta"].get("pct_change") is not None:
             delta_txt = f" ({kpi['delta']['pct_change']:+.1f}% vs. prior period)"
         headline_bullets.append(
-            f"{kpi['label']} ({kpi['aggregation']}): {kpi['primary_value']:,}{delta_txt}."
+            f"{sanitize_label(kpi['label'])} ({sanitize_label(kpi['aggregation'])}): "
+            f"{kpi['primary_value']:,}{delta_txt}."
         )
 
     driver_bullets: list[str] = []
     if diagnostics:
-        driver_bullets.extend(diagnostics.get("findings", [])[:4])
+        driver_bullets.extend(
+            sanitize_label(item, max_len=180)
+            for item in diagnostics.get("findings", [])[:4]
+        )
 
     forecast_bullets: list[str] = []
     if forecast_result:
@@ -275,7 +365,9 @@ def build_executive_brief(
                 f"{metric_label} latest actual is {forecast_result['last_actual']:,}, projected to {forecast_result['next_forecast']:,} next period via {forecast_result['method']}."
             )
         else:
-            forecast_bullets.append(forecast_result.get("reason", "Forecast not available."))
+            forecast_bullets.append(
+                sanitize_label(forecast_result.get("reason", "Forecast not available."), max_len=180)
+            )
 
     caveat_bullets: list[str] = []
     caveat_bullets.extend(profile.get("readiness_notes", []))
@@ -288,7 +380,7 @@ def build_executive_brief(
     seen: set[str] = set()
     unique_caveats: list[str] = []
     for item in caveat_bullets:
-        cleaned = _strip_markdown(item).strip()
+        cleaned = sanitize_label(item, max_len=180, fallback="")
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             unique_caveats.append(cleaned)
@@ -310,10 +402,16 @@ def build_executive_brief(
     prs.slide_height = Inches(7.5)
 
     title_slide = prs.slides.add_slide(prs.slide_layouts[0])
-    title_slide.shapes.title.text = _strip_markdown(f"Stakeholder Deck: {clean_source}")
+    title_slide.shapes.title.text = sanitize_label(
+        f"Stakeholder Deck: {clean_source}",
+        max_len=60,
+    )
     if len(title_slide.placeholders) > 1:
         title_slide.placeholders[1].text = (
-            f"Generated by Danica - Data Analyst Assistant ({generated_at})"
+            sanitize_label(
+                f"Generated by Danica - Data Analyst Assistant ({generated_at})",
+                max_len=120,
+            )
         )
 
     _add_split_slide(prs, "Key Performance Highlights", headline_bullets, trend_png)
@@ -344,9 +442,9 @@ def build_executive_brief(
     return {
         "source_name": clean_source,
         "generated_at": generated_at,
-        "headline_bullets": [_strip_markdown(b) for b in headline_bullets],
-        "driver_bullets": [_strip_markdown(b) for b in driver_bullets],
-        "forecast_bullets": [_strip_markdown(b) for b in forecast_bullets],
+        "headline_bullets": [sanitize_label(b, max_len=180) for b in headline_bullets],
+        "driver_bullets": [sanitize_label(b, max_len=180) for b in driver_bullets],
+        "forecast_bullets": [sanitize_label(b, max_len=180) for b in forecast_bullets],
         "caveat_bullets": unique_caveats,
         "docx_bytes": docx_bytes,
         "pptx_bytes": pptx_bytes,
