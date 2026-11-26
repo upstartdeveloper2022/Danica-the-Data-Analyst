@@ -4,7 +4,12 @@ import pandas as pd
 import pytest
 
 from data_loader import load_dataset
-from diagnostics_engine import run_root_cause_diagnostics
+from diagnostics_engine import (
+    is_free_text_column,
+    is_identifier_column,
+    run_root_cause_diagnostics,
+    sanitize_label,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_CSV = PROJECT_ROOT / "sample_data" / "operations_sample.csv"
@@ -44,6 +49,40 @@ def test_diagnostics_without_categories_or_dates():
     assert diag["is_rate"] is True
     assert diag["segment_drivers"] == []
     assert diag["period_movers"] == []
+
+
+def test_diagnostics_excludes_prose_and_automatic_identifier_segments():
+    prose = [
+        f"Paragraph one for record {idx}.\n\nParagraph two includes more detail {idx}."
+        for idx in range(12)
+    ]
+    df = pd.DataFrame(
+        {
+            "department": ["Claims", "Support"] * 6,
+            "text": prose,
+            "prompt_hash": [f"hash-{idx:08d}" for idx in range(12)],
+            "n_words": list(range(1, 13)),
+        }
+    )
+
+    assert is_free_text_column(df["text"])
+    assert is_identifier_column(df["prompt_hash"], "prompt_hash")
+    diagnostics = run_root_cause_diagnostics(df, metric_col="n_words")
+    assert [item["dimension"] for item in diagnostics["segment_drivers"]] == ["department"]
+    assert all("**" not in finding for finding in diagnostics["findings"])
+
+    explicitly_requested = run_root_cause_diagnostics(
+        df, metric_col="n_words", category_cols=["prompt_hash"]
+    )
+    assert [item["dimension"] for item in explicitly_requested["segment_drivers"]] == [
+        "prompt_hash"
+    ]
+
+
+def test_sanitize_label_collapses_and_truncates():
+    assert sanitize_label("  **Long\n label**  ") == "Long label"
+    assert sanitize_label("a " * 60, max_len=20).endswith("...")
+    assert len(sanitize_label("a " * 60, max_len=20)) <= 20
 
 
 def test_diagnostics_rejects_empty_or_missing_metric():
