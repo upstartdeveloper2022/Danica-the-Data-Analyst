@@ -68,6 +68,7 @@ _HIGH_PRIORITY_FOCUS_TOKENS = {
     "orders",
     "tickets",
 }
+_CALENDAR_COMPONENTS = {"year", "month", "day", "quarter", "week", "hour"}
 
 
 def _tokenize_col(col_name: str) -> tuple[str, set[str]]:
@@ -75,6 +76,12 @@ def _tokenize_col(col_name: str) -> tuple[str, set[str]]:
     spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", spaced)
     normalized = re.sub(r"[^a-z0-9]+", "_", spaced.lower()).strip("_")
     return normalized, set(normalized.split("_"))
+
+
+def is_calendar_component(col_name: str) -> bool:
+    """Identify standalone calendar-part columns that are not analytical metrics."""
+    normalized, _ = _tokenize_col(col_name)
+    return normalized in _CALENDAR_COMPONENTS
 
 
 def _default_aggregation_for_metric(col_name: str, series: pd.Series | None = None) -> str:
@@ -174,6 +181,7 @@ def identify_and_compute_kpis(
         for col in df.columns
         if pd.api.types.is_numeric_dtype(df[col])
         and not is_boolean_column(df[col])
+        and not is_calendar_component(str(col))
     ]
 
     if not raw_numeric_cols:
