@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pandas as pd
+
+from diagnostics_engine import is_boolean_column, is_identifier_column
 
 _MEAN_DEFAULT_TOKENS = {
     # Price / valuation levels
@@ -29,6 +32,8 @@ _MEAN_DEFAULT_TOKENS = {
     "avg",
     "average",
     "mean",
+    "age",
+    "diff",
 }
 
 _LOW_PRIORITY_FOCUS_TOKENS = {
@@ -63,7 +68,7 @@ _HIGH_PRIORITY_FOCUS_TOKENS = {
 
 
 def _tokenize_col(col_name: str) -> tuple[str, set[str]]:
-    normalized = col_name.lower().replace("-", "_").replace(" ", "_")
+    normalized = re.sub(r"[^a-z0-9]+", "_", col_name.lower()).strip("_")
     return normalized, set(normalized.split("_"))
 
 
@@ -163,14 +168,26 @@ def identify_and_compute_kpis(
         str(col)
         for col in df.columns
         if pd.api.types.is_numeric_dtype(df[col])
-        and not pd.api.types.is_bool_dtype(df[col])
+        and not is_boolean_column(df[col])
     ]
 
     if not raw_numeric_cols:
-        notes.append("No numeric columns detected for KPI calculation.")
+        notes.append("No continuous numeric columns detected for KPI calculation.")
         return {"kpis": kpis, "notes": notes}
 
-    ordered_cols = rank_priority_metrics(raw_numeric_cols)
+    analytical_cols = [
+        col
+        for col in raw_numeric_cols
+        if not is_identifier_column(df[col], col)
+    ]
+    if analytical_cols:
+        candidate_cols = analytical_cols
+    else:
+        candidate_cols = raw_numeric_cols
+        notes.append(
+            "Only identifier-like numeric columns are available; using them as fallback KPIs."
+        )
+    ordered_cols = rank_priority_metrics(candidate_cols)
 
     for col in ordered_cols[:max_kpis]:
         series = pd.to_numeric(df[col], errors="coerce").dropna()
