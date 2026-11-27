@@ -51,9 +51,14 @@ def is_free_text_column(series: pd.Series) -> bool:
 
 def is_identifier_column(series: pd.Series, column_name: str) -> bool:
     """Identify named ID/hash fields and highly unique opaque string keys."""
-    normalized = re.sub(r"[^a-z0-9]+", "_", column_name.lower()).strip("_")
+    camel_case_name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", column_name)
+    normalized = re.sub(r"[^a-z0-9]+", "_", camel_case_name.lower()).strip("_")
     tokens = set(normalized.split("_"))
-    if tokens & {"id", "uuid", "guid", "hash", "identifier"}:
+    if (
+        normalized == "id"
+        or normalized.endswith("_id")
+        or tokens & {"uuid", "guid", "hash", "identifier", "code", "key"}
+    ):
         return True
 
     values = series.dropna().astype(str)
@@ -62,18 +67,48 @@ def is_identifier_column(series: pd.Series, column_name: str) -> bool:
     unique_count = int(values.nunique(dropna=True))
     uniqueness_ratio = float(unique_count / len(values))
     average_length = float(values.str.len().mean())
-    if uniqueness_ratio >= 0.98 and average_length >= 8:
-        return True
+    if uniqueness_ratio >= 0.98 and 8 <= average_length <= 128:
+        if pd.api.types.is_numeric_dtype(series):
+            return True
+        compact_value_ratio = float(
+            values.str.fullmatch(r"[A-Za-z0-9_-]+").mean()
+        )
+        if compact_value_ratio >= 0.95:
+            return True
     return (
-        bool(tokens & {"group", "code", "key"})
+        bool(tokens & {"group"})
         and unique_count >= 100
         and uniqueness_ratio >= 0.10
     )
 
 
+def is_boolean_column(series: pd.Series) -> bool:
+    """Identify native booleans and numeric 0/1 indicator fields."""
+    if pd.api.types.is_bool_dtype(series):
+        return True
+    if not pd.api.types.is_numeric_dtype(series):
+        return False
+
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    return not values.empty and values.isin([0, 1]).all()
+
+
+def has_analytical_numeric_columns(df: pd.DataFrame) -> bool:
+    """Return whether the frame has a continuous, non-identifier numeric measure."""
+    return any(
+        pd.api.types.is_numeric_dtype(df[col])
+        and not is_boolean_column(df[col])
+        and not is_identifier_column(df[col], str(col))
+        for col in df.columns
+    )
+
+
 def _is_rate_metric(col_name: str, series: pd.Series) -> bool:
     lowered = col_name.strip().lower()
-    if any(token in lowered for token in ("pct", "percent", "rate", "sla", "ratio", "score", "avg", "mean")):
+    if any(
+        token in lowered
+        for token in ("pct", "percent", "rate", "sla", "ratio", "score", "avg", "mean", "age", "diff")
+    ):
         return True
     clean = pd.to_numeric(series, errors="coerce").dropna()
     if (
@@ -220,6 +255,12 @@ def _detect_iqr_outliers(
     category_cols: list[str] | None = None,
 ) -> pd.DataFrame:
     """Flag rows where metric_col falls outside 1.5 * IQR."""
+    if (
+        is_identifier_column(df[metric_col], metric_col)
+        and has_analytical_numeric_columns(df)
+    ):
+        return pd.DataFrame()
+
     series = pd.to_numeric(df[metric_col], errors="coerce")
     clean = series.dropna()
     if len(clean) < 4:
@@ -269,6 +310,10 @@ def run_root_cause_diagnostics(
     series = pd.to_numeric(df[metric_col], errors="coerce").dropna()
     if series.empty:
         raise ValueError(f"Metric column '{metric_col}' contains no valid numeric values.")
+    if is_identifier_column(df[metric_col], metric_col) and has_analytical_numeric_columns(df):
+        raise ValueError(
+            f"Identifier column '{metric_col}' cannot be used for diagnostics when analytical numeric measures are available."
+        )
 
     if category_cols is None:
         category_cols = [
@@ -287,7 +332,8 @@ def run_root_cause_diagnostics(
         category_cols = [
             col
             for col in category_cols
-            if col in df.columns and not is_free_text_column(df[col])
+            if col in df.columns
+            and not is_free_text_column(df[col])
         ]
 
     is_rate = _is_rate_metric(metric_col, series)
@@ -299,8 +345,17 @@ def run_root_cause_diagnostics(
 
     findings: list[str] = []
     for drv in drivers:
+        if is_rate:
+            if drv["segment_value"] > drv["overall_baseline"]:
+                segment_phrase = "leads with"
+            elif drv["segment_value"] < drv["overall_baseline"]:
+                segment_phrase = "lags with"
+            else:
+                segment_phrase = "matches the overall mean at"
+        else:
+            segment_phrase = "leads with"
         findings.append(
-            f"By {drv['dimension']}, {drv['top_segment']} leads with "
+            f"By {drv['dimension']}, {drv['top_segment']} {segment_phrase} "
             f"{drv['segment_value']:,} ({drv['impact_metric']})."
         )
     for mov in movers:
