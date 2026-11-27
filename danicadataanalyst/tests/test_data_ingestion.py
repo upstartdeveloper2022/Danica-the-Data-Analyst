@@ -42,6 +42,68 @@ def test_load_excel_bytes():
     assert pd.api.types.is_datetime64_any_dtype(loaded["date"])
 
 
+def test_profile_separates_identifiers_boolean_flags_and_measures():
+    df = pd.DataFrame(
+        {
+            "PatientId": [100001, 100001, 100002],
+            "AppointmentID": [900001, 900002, 900003],
+            "Age": [21, 45, 37],
+            "Date.diff": [0, 2, 4],
+            "Scholarship": [False, True, False],
+            "SMS_received": [0, 1, 0],
+            "Gender": ["F", "M", "F"],
+        }
+    )
+    profile = profile_dataset(df)
+
+    assert profile["numeric_columns"] == ["Age", "Date.diff"]
+    assert profile["boolean_columns"] == ["Scholarship", "SMS_received"]
+    assert profile["identifier_columns"] == ["PatientId", "AppointmentID"]
+    assert profile["categorical_columns"] == ["Gender"]
+    assert profile["columns"][0]["type"] == "identifier"
+
+
+def test_profile_surfaces_high_missingness_as_readiness_caveats():
+    df = pd.DataFrame(
+        {
+            "OperatingPhysician": [None] * 8 + ["P1", "P2"],
+            "Age": range(10),
+        }
+    )
+    profile = profile_dataset(df)
+
+    assert any(
+        "Operating Physician" in note and "80.0%" in note
+        for note in profile["readiness_notes"]
+    )
+
+
+def test_profile_caps_skew_caveats_at_five_and_summarizes_the_rest():
+    df = pd.DataFrame(
+        {
+            f"Value{idx}": [1] * 9 + [11 + idx * 10]
+            for idx in range(8)
+        }
+    )
+
+    profile = profile_dataset(df)
+    skew_notes = [
+        note
+        for note in profile["readiness_notes"]
+        if "notable gap between mean" in note
+    ]
+    summary_notes = [
+        note
+        for note in profile["readiness_notes"]
+        if "additional numeric columns show notable mean-vs.-median differences" in note
+    ]
+
+    assert len(skew_notes) == 5
+    assert "'Value7'" in skew_notes[0]
+    assert len(summary_notes) == 1
+    assert "...and 3 additional numeric columns" in summary_notes[0]
+
+
 def test_reject_unsupported_extension(tmp_path: Path):
     bad_file = tmp_path / "notes.txt"
     bad_file.write_text("hello", encoding="utf-8")
