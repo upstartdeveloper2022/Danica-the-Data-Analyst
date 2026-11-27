@@ -1,190 +1,151 @@
 from __future__ import annotations
 
-import re
+import csv
+from io import BytesIO, StringIO
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from diagnostics_engine import format_column_label, is_boolean_column, is_identifier_column
 
-_DURATION_STR_PATTERN = re.compile(r"^\s*\d{1,3}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*$")
-_DURATION_NAME_HINTS = {
-    "duration",
-    "length",
-    "elapsed",
-    "time_played",
-    "ms_played",
-    "min",
-    "mins",
-    "minute",
-    "minutes",
-    "sec",
-    "secs",
-    "second",
-    "seconds",
-}
+class DataLoadError(Exception):
+    """Raised when a dataset cannot be loaded or validated."""
 
 
-def _looks_like_duration_column(col_name: str, non_null: pd.Series) -> bool:
-    """Detect elapsed duration strings like '3:56' (M:SS) or '2:05:55' (H:MM:SS)."""
-    sample = non_null.head(100)
-    if sample.empty:
-        return False
-
-    matches = sample.apply(lambda v: bool(_DURATION_STR_PATTERN.match(str(v))))
-    match_ratio = float(matches.sum()) / len(sample)
-    if match_ratio < 0.70:
-        return False
-
-    normalized = col_name.lower().replace("-", "_").replace(" ", "_")
-    tokens = set(normalized.split("_"))
-    if tokens & _DURATION_NAME_HINTS or normalized.endswith("_h") or normalized.endswith("_min"):
-        return True
-
-    # Even without name hints, colon-separated values with small first components
-    # (e.g., 0-23 hours or 0-99 minutes) are durations unless they include a date/AM-PM.
-    has_date_or_ampm = sample.str.contains(
-        r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4}|am|pm|[-/])",
-        case=False,
-        regex=True,
-    ).any()
-    return not has_date_or_ampm
+_MISSING_TOKENS = {"", "-", "--", "—", "na", "n/a", "nan", "none", "null"}
 
 
-def _looks_like_date_series(col_name: str, series: pd.Series) -> tuple[bool, pd.Series | None]:
-    """Return (True, parsed_series) if a non-numeric series is predominantly valid dates."""
-    if pd.api.types.is_datetime64_any_dtype(series):
-        return True, pd.to_datetime(series, errors="coerce")
-
-    if pd.api.types.is_numeric_dtype(series):
-        return False, None
-
-    non_null = series.dropna().astype(str).str.strip()
-    if non_null.empty:
-        return False, None
-
-    if _looks_like_duration_column(col_name, non_null):
-        return False, None
-
-    sample = non_null.head(200)
-    parsed_sample = pd.to_datetime(sample, errors="coerce")
-    if (parsed_sample.notna().sum() / len(sample)) >= 0.80:
-        parsed_full = pd.to_datetime(series, errors="coerce")
-        if (parsed_full.notna().sum() / len(non_null)) >= 0.80:
-            return True, parsed_full
-
-    return False, None
+def _decode_text_bytes(raw_bytes: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return raw_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw_bytes.decode("utf-8", errors="replace")
 
 
-def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
-    row_count, col_count = df.shape
-    duplicate_rows = int(df.duplicated().sum())
+def _detect_csv_delimiter(text: str) -> str:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ","
 
-    numeric_columns: list[str] = []
-    boolean_columns: list[str] = []
-    identifier_columns: list[str] = []
-    categorical_columns: list[str] = []
-    datetime_columns: list[str] = []
-    columns_info: list[dict[str, Any]] = []
-    numeric_summary: dict[str, dict[str, float]] = {}
-    readiness_notes: list[str] = []
-    skew_notes: list[tuple[float, str]] = []
+    sample = "\n".join(lines[:15])
+    delimiters = [",", ";", "\t", "|"]
 
-    for col in df.columns:
-        col_name = str(col)
-        series = df[col]
-        missing_count = int(series.isna().sum())
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=delimiters)
+        if dialect.delimiter in delimiters:
+            return dialect.delimiter
+    except csv.Error:
+        pass
 
-        is_dt, parsed_dt = _looks_like_date_series(col_name, series)
-        if is_dt and parsed_dt is not None:
-            datetime_columns.append(col_name)
-            columns_info.append(
-                {
-                    "column": col_name,
-                    "type": "datetime",
-                    "dtype": str(parsed_dt.dtype),
-                    "missing_count": missing_count,
-                }
-            )
+    comma_count = sample.count(",")
+    best_delim = ","
+    best_count = comma_count
+
+    for delim in (";", "\t", "|"):
+        count = sample.count(delim)
+        if count > best_count:
+            best_count = count
+            best_delim = delim
+
+    return best_delim
+
+
+def _read_csv_bytes(raw_bytes: bytes) -> pd.DataFrame:
+    text = _decode_text_bytes(raw_bytes)
+    sep = _detect_csv_delimiter(text)
+    df = pd.read_csv(StringIO(text), sep=sep)
+
+    if df.shape[1] == 1:
+        col_name = str(df.columns[0])
+        for fallback_sep in (";", ",", "\t", "|"):
+            if fallback_sep != sep and fallback_sep in col_name:
+                retry_df = pd.read_csv(StringIO(text), sep=fallback_sep)
+                if retry_df.shape[1] > 1:
+                    return retry_df
+
+    return df
+
+
+def _coerce_numeric_like_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert object columns containing comma-formatted numbers and dash placeholders."""
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_numeric_dtype(out[col]) or pd.api.types.is_datetime64_any_dtype(out[col]):
+            continue
+        if out[col].dtype != object and str(out[col].dtype) != "string":
             continue
 
-        if is_identifier_column(series, col_name):
-            identifier_columns.append(col_name)
-            col_type = "identifier"
-        elif is_boolean_column(series):
-            boolean_columns.append(col_name)
-            col_type = "boolean"
-        elif pd.api.types.is_numeric_dtype(series):
-            numeric_columns.append(col_name)
-            num_s = pd.to_numeric(series, errors="coerce").dropna()
-            col_type = "numeric"
-            if not num_s.empty:
-                mean_val = float(num_s.mean())
-                median_val = float(num_s.median())
-                numeric_summary[col_name] = {
-                    "min": round(float(num_s.min()), 4),
-                    "median": round(median_val, 4),
-                    "mean": round(mean_val, 4),
-                    "max": round(float(num_s.max()), 4),
-                }
-                if median_val != 0 and abs(mean_val - median_val) / abs(median_val) > 0.25:
-                    skew_notes.append(
-                        (
-                            abs(mean_val - median_val),
-                            f"'{col_name}' shows a notable gap between mean "
-                            f"({mean_val:.2f}) and median ({median_val:.2f}) - "
-                            "check for outliers or skew.",
-                        )
-                    )
+        raw_str = out[col].astype(str).str.strip()
+        non_empty = raw_str[~raw_str.str.lower().isin(_MISSING_TOKENS)]
+        if non_empty.empty:
+            continue
+
+        cleaned = (
+            raw_str.str.replace(",", "", regex=False)
+            .str.replace("$", "", regex=False)
+            .str.replace("€", "", regex=False)
+            .str.replace("£", "", regex=False)
+        )
+        cleaned = cleaned.where(~raw_str.str.lower().isin(_MISSING_TOKENS), other=pd.NA)
+        parsed = pd.to_numeric(cleaned, errors="coerce")
+
+        valid_after_clean = parsed.notna().sum()
+        # Convert if at least 70% of non-placeholder rows parse cleanly as numbers
+        if len(non_empty) > 0 and (valid_after_clean / len(non_empty)) >= 0.70:
+            out[col] = parsed
+
+    return out
+
+
+def load_dataset(source: str | Path | Any) -> pd.DataFrame:
+    """Load a CSV or Excel dataset from a path or uploaded file-like object."""
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        if not path.exists():
+            raise DataLoadError(f"File not found: {path}")
+        if not path.is_file():
+            raise DataLoadError(f"Expected a file, got: {path}")
+
+        suffix = path.suffix.lower()
+        try:
+            if suffix == ".csv":
+                df = _read_csv_bytes(path.read_bytes())
+            elif suffix in (".xlsx", ".xls"):
+                df = pd.read_excel(path)
+            else:
+                raise DataLoadError(
+                    f"Unsupported file extension '{suffix}'. Please upload a .csv, .xlsx, or .xls file."
+                )
+            return _coerce_numeric_like_columns(df)
+        except DataLoadError:
+            raise
+        except Exception as exc:
+            raise DataLoadError(f"Failed to read '{path.name}': {exc}") from exc
+
+    file_name = getattr(source, "name", "uploaded_file")
+    suffix = Path(file_name).suffix.lower()
+
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        raw_bytes = source.read()
+        if isinstance(raw_bytes, str):
+            raw_bytes = raw_bytes.encode("utf-8")
+        if not isinstance(raw_bytes, (bytes, bytearray)) or len(raw_bytes) == 0:
+            raise DataLoadError(f"Uploaded file '{file_name}' is empty.")
+
+        if suffix == ".csv" or not suffix:
+            df = _read_csv_bytes(bytes(raw_bytes))
+        elif suffix in (".xlsx", ".xls"):
+            df = pd.read_excel(BytesIO(bytes(raw_bytes)))
         else:
-            col_type = "categorical"
-            categorical_columns.append(col_name)
-
-        columns_info.append(
-            {
-                "column": col_name,
-                "type": col_type,
-                "dtype": str(series.dtype),
-                "missing_count": missing_count,
-            }
-        )
-
-    skew_notes.sort(key=lambda item: item[0], reverse=True)
-    readiness_notes.extend(note for _, note in skew_notes[:5])
-    additional_skew_count = len(skew_notes) - 5
-    if additional_skew_count > 0:
-        readiness_notes.append(
-            f"...and {additional_skew_count} additional numeric columns show notable "
-            "mean-vs.-median differences."
-        )
-
-    if not datetime_columns:
-        readiness_notes.append(
-            "No date/time column detected: time-series trends and forecasting will not be available unless a date column is added."
-        )
-
-    missing_columns = [
-        (str(col), int(df[col].isna().sum()))
-        for col in df.columns
-        if len(df) and float(df[col].isna().mean()) >= 0.05
-    ]
-    for col_name, missing_count in missing_columns:
-        missing_pct = missing_count / row_count * 100.0
-        readiness_notes.append(
-            f"Missing data in {format_column_label(col_name)}: "
-            f"{missing_count:,} rows ({missing_pct:.1f}%)."
-        )
-
-    return {
-        "row_count": int(row_count),
-        "col_count": int(col_count),
-        "duplicate_rows": duplicate_rows,
-        "numeric_columns": numeric_columns,
-        "boolean_columns": boolean_columns,
-        "identifier_columns": identifier_columns,
-        "categorical_columns": categorical_columns,
-        "datetime_columns": datetime_columns,
-        "columns": columns_info,
-        "numeric_summary": numeric_summary,
-        "readiness_notes": readiness_notes,
-    }
+            raise DataLoadError(
+                f"Unsupported file type '{suffix}' for '{file_name}'. Please upload a .csv, .xlsx, or .xls file."
+            )
+        return _coerce_numeric_like_columns(df)
+    except DataLoadError:
+        raise
+    except Exception as exc:
+        raise DataLoadError(f"Failed to load '{file_name}': {exc}") from exc
