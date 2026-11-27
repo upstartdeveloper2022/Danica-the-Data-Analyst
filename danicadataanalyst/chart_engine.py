@@ -6,10 +6,23 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from diagnostics_engine import has_analytical_numeric_columns, is_identifier_column
+
+
+def _is_excluded_identifier_metric(df: pd.DataFrame, metric_col: str) -> bool:
+    return (
+        metric_col in df.columns
+        and has_analytical_numeric_columns(df)
+        and is_identifier_column(df[metric_col], metric_col)
+    )
+
 
 def _is_rate_metric(col_name: str, series: pd.Series) -> bool:
     lowered = col_name.strip().lower()
-    if any(token in lowered for token in ("pct", "percent", "rate", "sla", "ratio", "score", "avg", "mean")):
+    if any(
+        token in lowered
+        for token in ("pct", "percent", "rate", "sla", "ratio", "score", "avg", "mean", "age", "diff")
+    ):
         return True
     clean = pd.to_numeric(series, errors="coerce").dropna()
     if (
@@ -31,6 +44,8 @@ def build_trend_chart(
     if df is None or df.empty or not date_col or date_col not in df.columns:
         return None
     if metric_col not in df.columns:
+        return None
+    if _is_excluded_identifier_metric(df, metric_col):
         return None
 
     working = df[[date_col, metric_col]].copy()
@@ -67,6 +82,13 @@ def build_breakdown_chart(
         return None
     if metric_col not in df.columns:
         return None
+    if _is_excluded_identifier_metric(df, metric_col):
+        return None
+    if (
+        has_analytical_numeric_columns(df)
+        and is_identifier_column(df[category_col], category_col)
+    ):
+        return None
 
     working = df[[category_col, metric_col]].copy()
     working[category_col] = working[category_col].fillna("Missing").astype(str)
@@ -101,6 +123,8 @@ def build_distribution_chart(
 ) -> go.Figure | None:
     """Build a histogram/distribution chart for a numeric metric."""
     if df is None or df.empty or metric_col not in df.columns:
+        return None
+    if _is_excluded_identifier_metric(df, metric_col):
         return None
 
     series = pd.to_numeric(df[metric_col], errors="coerce").dropna()
