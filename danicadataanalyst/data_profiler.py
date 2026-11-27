@@ -5,6 +5,8 @@ from typing import Any
 
 import pandas as pd
 
+from diagnostics_engine import is_boolean_column, is_identifier_column
+
 _DURATION_STR_PATTERN = re.compile(r"^\s*\d{1,3}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*$")
 _DURATION_NAME_HINTS = {
     "duration",
@@ -79,6 +81,9 @@ def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
     duplicate_rows = int(df.duplicated().sum())
 
     numeric_columns: list[str] = []
+    boolean_columns: list[str] = []
+    identifier_columns: list[str] = []
+    categorical_columns: list[str] = []
     datetime_columns: list[str] = []
     columns_info: list[dict[str, Any]] = []
     numeric_summary: dict[str, dict[str, float]] = {}
@@ -102,7 +107,13 @@ def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
             )
             continue
 
-        if pd.api.types.is_numeric_dtype(series):
+        if is_identifier_column(series, col_name):
+            identifier_columns.append(col_name)
+            col_type = "identifier"
+        elif is_boolean_column(series):
+            boolean_columns.append(col_name)
+            col_type = "boolean"
+        elif pd.api.types.is_numeric_dtype(series):
             numeric_columns.append(col_name)
             num_s = pd.to_numeric(series, errors="coerce").dropna()
             col_type = "numeric"
@@ -121,6 +132,7 @@ def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
                     )
         else:
             col_type = "categorical"
+            categorical_columns.append(col_name)
 
         columns_info.append(
             {
@@ -141,6 +153,9 @@ def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
         "col_count": int(col_count),
         "duplicate_rows": duplicate_rows,
         "numeric_columns": numeric_columns,
+        "boolean_columns": boolean_columns,
+        "identifier_columns": identifier_columns,
+        "categorical_columns": categorical_columns,
         "datetime_columns": datetime_columns,
         "columns": columns_info,
         "numeric_summary": numeric_summary,
