@@ -31,6 +31,23 @@ def sanitize_label(
     return f"{prefix}..."
 
 
+def format_column_label(value: Any) -> str:
+    """Split camel case and separators into readable display text."""
+    text = "" if value is None else str(value)
+    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    text = re.sub(r"[_\-.]+", " ", text).strip()
+    return re.sub(r"\s+", " ", text).title()
+
+
+def valid_category_mask(series: pd.Series) -> pd.Series:
+    """Exclude nulls and common textual null markers from segment ranking."""
+    mask = series.notna()
+    text_values = series.astype("string").str.strip()
+    missing_markers = {"", "missing", "<missing>", "nan", "none", "null", "n/a", "na"}
+    return mask & ~text_values.str.casefold().isin(missing_markers).fillna(False)
+
+
 def is_free_text_column(series: pd.Series) -> bool:
     """Identify prose-like text using length, multiline, and uniqueness signals."""
     values = series.dropna().astype(str)
@@ -136,10 +153,11 @@ def _analyze_segment_drivers(
     for cat_col in category_cols:
         if cat_col not in df.columns:
             continue
+        valid_categories = valid_category_mask(df[cat_col])
         working = pd.DataFrame(
             {
-                "segment": df[cat_col].fillna("Missing").astype(str),
-                "value": clean_metric,
+                "segment": df.loc[valid_categories, cat_col].astype(str),
+                "value": clean_metric.loc[valid_categories],
             }
         ).dropna(subset=["value"])
 
@@ -155,7 +173,7 @@ def _analyze_segment_drivers(
             top = grouped.iloc[0]
             drivers.append(
                 {
-                    "dimension": sanitize_label(cat_col),
+                    "dimension": format_column_label(cat_col),
                     "top_segment": sanitize_label(top["segment"]),
                     "record_count": int(top["count"]),
                     "segment_value": round(float(top["mean"]), 2),
@@ -171,7 +189,7 @@ def _analyze_segment_drivers(
             top = grouped.iloc[0]
             drivers.append(
                 {
-                    "dimension": sanitize_label(cat_col),
+                    "dimension": format_column_label(cat_col),
                     "top_segment": sanitize_label(top["segment"]),
                     "record_count": int(top["count"]),
                     "segment_value": round(float(top["sum"]), 2),
@@ -217,8 +235,10 @@ def _analyze_period_movers(
     for cat_col in category_cols:
         if cat_col not in working.columns:
             continue
-        prev_grp = prev_df.groupby(cat_col)[metric_col].agg(agg_func)
-        curr_grp = curr_df.groupby(cat_col)[metric_col].agg(agg_func)
+        prev_valid = prev_df.loc[valid_category_mask(prev_df[cat_col])]
+        curr_valid = curr_df.loc[valid_category_mask(curr_df[cat_col])]
+        prev_grp = prev_valid.groupby(cat_col)[metric_col].agg(agg_func)
+        curr_grp = curr_valid.groupby(cat_col)[metric_col].agg(agg_func)
         combined = pd.DataFrame({"prev": prev_grp, "curr": curr_grp}).dropna()
         if combined.empty:
             continue
@@ -233,7 +253,7 @@ def _analyze_period_movers(
         row = combined.loc[top_idx]
         movers.append(
             {
-                "dimension": sanitize_label(cat_col),
+                "dimension": format_column_label(cat_col),
                 "segment": sanitize_label(top_idx),
                 "comparison": f"{curr_p} vs. {prev_p}",
                 "previous": round(float(row["prev"]), 2),
@@ -366,10 +386,14 @@ def run_root_cause_diagnostics(
         )
     if not outliers_df.empty:
         findings.append(
-            f"Detected {len(outliers_df)} statistical outlier row(s) for {metric_col} using the 1.5×IQR rule."
+            f"Detected {len(outliers_df)} statistical outlier row(s) for "
+            f"{format_column_label(metric_col)} using the 1.5×IQR rule."
         )
     else:
-        findings.append(f"No extreme statistical outliers detected for {metric_col} (1.5×IQR rule).")
+        findings.append(
+            f"No extreme statistical outliers detected for "
+            f"{format_column_label(metric_col)} (1.5×IQR rule)."
+        )
 
     if len(df) < 25:
         findings.append(
