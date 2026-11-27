@@ -88,6 +88,7 @@ def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
     columns_info: list[dict[str, Any]] = []
     numeric_summary: dict[str, dict[str, float]] = {}
     readiness_notes: list[str] = []
+    skew_notes: list[tuple[float, str]] = []
 
     for col in df.columns:
         col_name = str(col)
@@ -127,8 +128,13 @@ def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
                     "max": round(float(num_s.max()), 4),
                 }
                 if median_val != 0 and abs(mean_val - median_val) / abs(median_val) > 0.25:
-                    readiness_notes.append(
-                        f"'{col_name}' shows a notable gap between mean ({mean_val:.2f}) and median ({median_val:.2f}) - check for outliers or skew."
+                    skew_notes.append(
+                        (
+                            abs(mean_val - median_val),
+                            f"'{col_name}' shows a notable gap between mean "
+                            f"({mean_val:.2f}) and median ({median_val:.2f}) - "
+                            "check for outliers or skew.",
+                        )
                     )
         else:
             col_type = "categorical"
@@ -141,6 +147,15 @@ def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
                 "dtype": str(series.dtype),
                 "missing_count": missing_count,
             }
+        )
+
+    skew_notes.sort(key=lambda item: item[0], reverse=True)
+    readiness_notes.extend(note for _, note in skew_notes[:5])
+    additional_skew_count = len(skew_notes) - 5
+    if additional_skew_count > 0:
+        readiness_notes.append(
+            f"...and {additional_skew_count} additional numeric columns show notable "
+            "mean-vs.-median differences."
         )
 
     if not datetime_columns:
