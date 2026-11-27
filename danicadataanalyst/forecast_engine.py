@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
@@ -7,11 +8,15 @@ import pandas as pd
 import plotly.graph_objects as go
 from statsmodels.tsa.holtwinters import Holt
 
-from diagnostics_engine import has_analytical_numeric_columns, is_identifier_column
+from diagnostics_engine import (
+    format_column_label,
+    has_analytical_numeric_columns,
+    is_identifier_column,
+)
 
 
 def _is_rate_metric(col_name: str, series: pd.Series) -> bool:
-    lowered = col_name.strip().lower()
+    lowered = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", col_name).strip().lower()
     if any(
         token in lowered
         for token in ("pct", "percent", "rate", "sla", "ratio", "score", "avg", "mean", "age", "diff")
@@ -47,7 +52,7 @@ def build_forecast_chart(
     agg_func: str,
 ) -> go.Figure:
     """Build a Plotly chart combining historical actuals and forecasted periods."""
-    metric_label = metric_col.replace("_", " ").title()
+    metric_label = format_column_label(metric_col)
     fig = go.Figure()
 
     fig.add_trace(
