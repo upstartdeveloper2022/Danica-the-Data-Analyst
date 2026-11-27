@@ -40,6 +40,36 @@ def test_forecast_handles_flat_series():
     assert list(result["forecast_df"]["forecast_value"]) == [90.0, 90.0]
 
 
+def test_forecast_skips_identifier_when_measures_exist():
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=5, freq="W"),
+            "AppointmentID": [900001, 900002, 900003, 900004, 900005],
+            "Age": [21, 45, 37, 60, 33],
+        }
+    )
+    result = generate_metric_forecast(df, "AppointmentID", date_col="date")
+
+    assert result["available"] is False
+    assert result["forecast_df"].empty
+    assert "identifier" in result["reason"]
+
+
+def test_age_and_date_difference_forecasts_use_mean_aggregation():
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=5, freq="W"),
+            "Age": [20, 45, 80, 110, 75],
+            "Date.diff": [0, 5, 120, 180, 90],
+        }
+    )
+    age = generate_metric_forecast(df, "Age", date_col="date")
+    diff = generate_metric_forecast(df, "Date.diff", date_col="date")
+
+    assert age["agg_func"] == "mean"
+    assert diff["agg_func"] == "mean"
+
+
 def test_forecast_rejects_empty_or_invalid_args():
     with pytest.raises(ValueError, match="empty"):
         generate_metric_forecast(pd.DataFrame(), metric_col="tickets")
