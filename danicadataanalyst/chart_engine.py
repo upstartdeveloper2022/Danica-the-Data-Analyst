@@ -143,6 +143,14 @@ def build_distribution_chart(
         title=f"Distribution of {format_column_label(metric_col)}",
         labels={"x": format_column_label(metric_col)},
     )
+    min_value = float(series.min())
+    max_value = float(series.max())
+    if min_value == max_value:
+        padding = abs(min_value) * 0.05 or 0.5
+        axis_range = [min_value - padding, max_value + padding]
+    else:
+        axis_range = [min_value, max_value]
+    fig.update_xaxes(range=axis_range)
     fig.update_layout(margin=dict(l=20, r=20, t=45, b=20))
     return fig
 
