@@ -8,8 +8,9 @@ import qa_engine
 import summary_engine
 from chart_engine import generate_milestone3_charts
 from data_loader import DataLoadError, load_dataset
-from data_profiler import profile_dataset
+from data_profiler import profile_dataset, synthesize_calendar_date
 from diagnostics_engine import (
+    format_column_label,
     is_free_text_column,
     is_identifier_column,
     run_root_cause_diagnostics,
@@ -56,6 +57,14 @@ if df is None:
     st.stop()
 
 profile = profile_dataset(df)
+derived_date_col = synthesize_calendar_date(df, profile["datetime_columns"])
+if derived_date_col:
+    profile["datetime_columns"].append(derived_date_col)
+    profile["readiness_notes"] = [
+        note
+        for note in profile["readiness_notes"]
+        if not note.startswith("No date/time column detected:")
+    ]
 default_date_col = profile["datetime_columns"][0] if profile["datetime_columns"] else None
 kpi_result = identify_and_compute_kpis(df, date_col=default_date_col)
 
@@ -64,11 +73,12 @@ st.session_state["active_profile"] = profile
 st.session_state["active_kpis"] = kpi_result
 
 st.subheader(f"Dataset Overview: `{source_label}`")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Rows", f"{profile['row_count']:,}")
 col2.metric("Columns", profile["col_count"])
 col3.metric("Numeric Cols", len(profile["numeric_columns"]))
-col4.metric("Duplicate Rows", profile["duplicate_rows"])
+col4.metric("Boolean Flags", len(profile["boolean_columns"]))
+col5.metric("Duplicate Rows", profile["duplicate_rows"])
 
 st.markdown("### Key Performance Indicators (KPIs)")
 if kpi_result["kpis"]:
@@ -87,7 +97,7 @@ if kpi_result["kpis"]:
     for kpi in kpi_result["kpis"]:
         kpi_rows.append(
             {
-                "Metric": kpi["metric"],
+                "Metric": kpi["label"],
                 "Primary Agg": kpi["aggregation"],
                 "Primary Value": kpi["primary_value"],
                 "Mean": kpi["mean"],
@@ -150,7 +160,9 @@ if available_metrics:
     for note in chart_bundle["notes"]:
         st.caption(f"Chart Note: {note}")
 
-    st.markdown(f"### Root-Cause & Driver Diagnostics (`{selected_metric}`)")
+    st.markdown(
+        f"### Root-Cause & Driver Diagnostics (`{format_column_label(selected_metric)}`)"
+    )
     diagnostics = run_root_cause_diagnostics(
         df=df,
         metric_col=selected_metric,
@@ -162,19 +174,35 @@ if available_metrics:
     for finding in diagnostics["findings"]:
         st.write(f"- {finding}")
 
-    diag_col1, diag_col2 = st.columns(2)
     if diagnostics["segment_drivers"]:
-        diag_col1.markdown("**Top Segment Drivers**")
-        diag_col1.dataframe(pd.DataFrame(diagnostics["segment_drivers"]), use_container_width=True)
+        st.markdown("**Top Segment Drivers**")
+        driver_table = pd.DataFrame(diagnostics["segment_drivers"])
+        st.dataframe(
+            driver_table,
+            column_config={
+                "dimension": st.column_config.TextColumn("Dimension", width="medium"),
+                "top_segment": st.column_config.TextColumn("Top Segment", width="medium"),
+                "impact_metric": st.column_config.TextColumn("Impact Metric", width="large"),
+            },
+            use_container_width=True,
+        )
     if diagnostics["period_movers"]:
-        diag_col2.markdown("**Largest Period-over-Period Segment Shifts**")
-        diag_col2.dataframe(pd.DataFrame(diagnostics["period_movers"]), use_container_width=True)
+        st.markdown("**Largest Period-over-Period Segment Shifts**")
+        st.dataframe(
+            pd.DataFrame(diagnostics["period_movers"]),
+            column_config={
+                "dimension": st.column_config.TextColumn("Dimension", width="medium"),
+                "segment": st.column_config.TextColumn("Segment", width="medium"),
+                "comparison": st.column_config.TextColumn("Comparison", width="medium"),
+            },
+            use_container_width=True,
+        )
 
     if not diagnostics["outliers"].empty:
         st.markdown("**Flagged Outlier Records (1.5×IQR)**")
         st.dataframe(diagnostics["outliers"], use_container_width=True)
 
-    st.markdown(f"### Short-Term Forecast (`{selected_metric}`)")
+    st.markdown(f"### Short-Term Forecast (`{format_column_label(selected_metric)}`)")
     forecast_result = generate_metric_forecast(
         df=df,
         metric_col=selected_metric,
@@ -266,26 +294,60 @@ for note in profile["readiness_notes"] + kpi_result["notes"]:
     st.write(f"- {note}")
 
 st.markdown("### Column Summary")
-st.dataframe(pd.DataFrame(profile["columns"]), use_container_width=True)
+column_summary = pd.DataFrame(profile["columns"])
+if "column" in column_summary.columns:
+    column_summary["column"] = column_summary["column"].map(format_column_label)
+column_summary_config = {}
+for col in column_summary.columns:
+    label = format_column_label(col)
+    if col == "missing_count":
+        column_summary_config[col] = st.column_config.NumberColumn(label, width="medium")
+    else:
+        width = "large" if col == "column" else "medium"
+        column_summary_config[col] = st.column_config.TextColumn(label, width=width)
+st.dataframe(
+    column_summary,
+    column_config=column_summary_config,
+    use_container_width=True,
+)
 
 if profile["numeric_summary"]:
     st.markdown("### Numeric Summary")
-    st.dataframe(pd.DataFrame(profile["numeric_summary"]).T, use_container_width=True)
+    numeric_summary = pd.DataFrame(profile["numeric_summary"]).T
+    numeric_summary.index = [
+        format_column_label(col) for col in numeric_summary.index
+    ]
+    numeric_summary = numeric_summary.rename(
+        columns={
+            "min": "Min",
+            "median": "Median",
+            "mean": "Mean",
+            "max": "Max",
+        }
+    )
+    st.dataframe(
+        numeric_summary,
+        column_config={
+            col: st.column_config.NumberColumn(col, width="medium")
+            for col in numeric_summary.columns
+        },
+        use_container_width=True,
+    )
 
 st.markdown("### Data Preview (First 15 Rows)")
 preview = df.head(15)
-preview_column_config = {
-    col: st.column_config.TextColumn(str(col), width="large")
-    for col in preview.columns
-    if (
-        pd.api.types.is_object_dtype(df[col])
-        or pd.api.types.is_string_dtype(df[col])
+preview_column_config = {}
+for col in preview.columns:
+    label = format_column_label(col)
+    width = (
+        "large"
+        if len(label) > 16 or is_identifier_column(df[col], str(col))
+        else "medium"
     )
-    and (
-        str(col).lower() in {"prompt_hash", "text", "description", "comment"}
-        or float(df[col].dropna().astype(str).str.len().mean() or 0) >= 32
-    )
-}
+    if pd.api.types.is_numeric_dtype(df[col]):
+        preview_column_config[col] = st.column_config.NumberColumn(label, width=width)
+    else:
+        preview_column_config[col] = st.column_config.TextColumn(label, width=width)
 st.dataframe(
     preview,
     column_order=list(preview.columns),
