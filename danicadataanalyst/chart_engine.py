@@ -6,7 +6,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from diagnostics_engine import has_analytical_numeric_columns, is_identifier_column
+from diagnostics_engine import (
+    format_column_label,
+    has_analytical_numeric_columns,
+    is_identifier_column,
+    valid_category_mask,
+)
 
 
 def _is_excluded_identifier_metric(df: pd.DataFrame, metric_col: str) -> bool:
@@ -65,7 +70,7 @@ def build_trend_chart(
         x=date_col,
         y=metric_col,
         markers=True,
-        title=f"{metric_col.replace('_', ' ').title()} Over Time ({agg_func})",
+        title=f"{format_column_label(metric_col)} Over Time ({agg_func})",
     )
     fig.update_layout(margin=dict(l=20, r=20, t=45, b=20))
     return fig
@@ -91,8 +96,9 @@ def build_breakdown_chart(
         return None
 
     working = df[[category_col, metric_col]].copy()
-    working[category_col] = working[category_col].fillna("Missing").astype(str)
     working[metric_col] = pd.to_numeric(working[metric_col], errors="coerce")
+    working = working.loc[valid_category_mask(working[category_col])]
+    working[category_col] = working[category_col].astype(str)
     working = working.dropna(subset=[metric_col])
 
     if working.empty:
@@ -111,7 +117,7 @@ def build_breakdown_chart(
         grouped,
         x=category_col,
         y=metric_col,
-        title=f"{metric_col.replace('_', ' ').title()} by {category_col.replace('_', ' ').title()} ({agg_func})",
+        title=f"{format_column_label(metric_col)} by {format_column_label(category_col)} ({agg_func})",
     )
     fig.update_layout(margin=dict(l=20, r=20, t=45, b=20))
     return fig
@@ -134,8 +140,8 @@ def build_distribution_chart(
     fig = px.histogram(
         x=series,
         nbins=min(20, max(5, len(series))),
-        title=f"Distribution of {metric_col.replace('_', ' ').title()}",
-        labels={"x": metric_col.replace("_", " ").title()},
+        title=f"Distribution of {format_column_label(metric_col)}",
+        labels={"x": format_column_label(metric_col)},
     )
     fig.update_layout(margin=dict(l=20, r=20, t=45, b=20))
     return fig
