@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from diagnostics_engine import is_boolean_column, is_identifier_column
+from diagnostics_engine import format_column_label, is_boolean_column, is_identifier_column
 
 _DURATION_STR_PATTERN = re.compile(r"^\s*\d{1,3}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*$")
 _DURATION_NAME_HINTS = {
@@ -146,6 +146,18 @@ def profile_dataset(df: pd.DataFrame) -> dict[str, Any]:
     if not datetime_columns:
         readiness_notes.append(
             "No date/time column detected: time-series trends and forecasting will not be available unless a date column is added."
+        )
+
+    missing_columns = [
+        (str(col), int(df[col].isna().sum()))
+        for col in df.columns
+        if len(df) and float(df[col].isna().mean()) >= 0.05
+    ]
+    for col_name, missing_count in missing_columns:
+        missing_pct = missing_count / row_count * 100.0
+        readiness_notes.append(
+            f"Missing data in {format_column_label(col_name)}: "
+            f"{missing_count:,} rows ({missing_pct:.1f}%)."
         )
 
     return {
