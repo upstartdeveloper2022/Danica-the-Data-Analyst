@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from diagnostics_engine import is_boolean_column, is_identifier_column
+from diagnostics_engine import format_column_label, is_boolean_column, is_identifier_column
 
 _MEAN_DEFAULT_TOKENS = {
     # Price / valuation levels
@@ -53,6 +53,9 @@ _HIGH_PRIORITY_FOCUS_TOKENS = {
     "views",
     "revenue",
     "sales",
+    "reimbursed",
+    "deductible",
+    "amt",
     "amount",
     "total",
     "count",
@@ -68,7 +71,9 @@ _HIGH_PRIORITY_FOCUS_TOKENS = {
 
 
 def _tokenize_col(col_name: str) -> tuple[str, set[str]]:
-    normalized = re.sub(r"[^a-z0-9]+", "_", col_name.lower()).strip("_")
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", col_name)
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", spaced)
+    normalized = re.sub(r"[^a-z0-9]+", "_", spaced.lower()).strip("_")
     return normalized, set(normalized.split("_"))
 
 
@@ -107,7 +112,7 @@ def rank_priority_metrics(numeric_cols: list[str]) -> list[str]:
 
 
 def _format_metric_label(col_name: str) -> str:
-    return col_name.replace("_", " ").strip().title()
+    return format_column_label(col_name)
 
 
 def _compute_period_delta(
