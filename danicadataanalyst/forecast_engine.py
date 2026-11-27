@@ -7,10 +7,15 @@ import pandas as pd
 import plotly.graph_objects as go
 from statsmodels.tsa.holtwinters import Holt
 
+from diagnostics_engine import has_analytical_numeric_columns, is_identifier_column
+
 
 def _is_rate_metric(col_name: str, series: pd.Series) -> bool:
     lowered = col_name.strip().lower()
-    if any(token in lowered for token in ("pct", "percent", "rate", "sla", "ratio", "score", "avg", "mean")):
+    if any(
+        token in lowered
+        for token in ("pct", "percent", "rate", "sla", "ratio", "score", "avg", "mean", "age", "diff")
+    ):
         return True
     clean = pd.to_numeric(series, errors="coerce").dropna()
     if (
@@ -96,6 +101,18 @@ def generate_metric_forecast(
         raise ValueError(f"Metric column '{metric_col}' not found in DataFrame.")
     if periods_ahead < 1:
         raise ValueError("periods_ahead must be at least 1.")
+    if (
+        has_analytical_numeric_columns(df)
+        and is_identifier_column(df[metric_col], metric_col)
+    ):
+        return {
+            "available": False,
+            "reason": f"Forecast skipped because '{metric_col}' is an identifier, not an analytical measure.",
+            "history_df": pd.DataFrame(),
+            "forecast_df": pd.DataFrame(),
+            "chart": None,
+            "notes": ["Forecast skipped for identifier-like metric."],
+        }
 
     if not date_col or date_col not in df.columns:
         return {
