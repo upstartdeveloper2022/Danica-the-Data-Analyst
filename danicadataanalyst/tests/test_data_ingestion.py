@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from data_loader import DataLoadError, load_dataset
-from data_profiler import profile_dataset
+from data_profiler import profile_dataset, synthesize_calendar_date
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_CSV = PROJECT_ROOT / "sample_data" / "operations_sample.csv"
@@ -102,6 +102,33 @@ def test_profile_caps_skew_caveats_at_five_and_summarizes_the_rest():
     assert "'Value7'" in skew_notes[0]
     assert len(summary_notes) == 1
     assert "...and 3 additional numeric columns" in summary_notes[0]
+
+
+def test_synthesize_date_from_calendar_parts():
+    df = pd.DataFrame(
+        {
+            "Year": [2024, 2024],
+            "Month": [2, 3],
+            "Day": [29, 1],
+            "metric": [10.0, 20.0],
+        }
+    )
+    date_col = synthesize_calendar_date(df)
+
+    assert date_col == "Date"
+    assert df[date_col].tolist() == [
+        pd.Timestamp("2024-02-29"),
+        pd.Timestamp("2024-03-01"),
+    ]
+
+
+def test_synthesize_date_defaults_missing_day_to_first_of_month():
+    df = pd.DataFrame({"year": [2024], "month": [7], "metric": [1.0]})
+
+    date_col = synthesize_calendar_date(df)
+
+    assert date_col == "Date"
+    assert df[date_col].iloc[0] == pd.Timestamp("2024-07-01")
 
 
 def test_reject_unsupported_extension(tmp_path: Path):
