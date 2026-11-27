@@ -44,6 +44,56 @@ def test_kpis_no_numeric_columns():
     assert len(result["notes"]) == 1
 
 
+def test_kpis_exclude_identifiers_and_boolean_indicators():
+    df = pd.DataFrame(
+        {
+            "PatientId": [100001, 100001, 100002, 100003],
+            "AppointmentID": [900001, 900002, 900003, 900004],
+            "Age": [21, 45, 37, 60],
+            "Date.diff": [0, 2, 4, 1],
+            "Scholarship": [False, True, False, True],
+            "SMS_received": [0, 1, 0, 1],
+        }
+    )
+    result = identify_and_compute_kpis(df)
+    metrics = [kpi["metric"] for kpi in result["kpis"]]
+
+    assert metrics == ["Age", "Date.diff"]
+    assert all(kpi["aggregation"] == "mean" for kpi in result["kpis"])
+
+    reimbursement = identify_and_compute_kpis(
+        pd.DataFrame({"InscClaimAmtReimbursed": [100, 200]})
+    )
+    assert reimbursement["kpis"][0]["label"] == "Insc Claim Amt Reimbursed"
+
+    identifier_only = identify_and_compute_kpis(
+        pd.DataFrame({"AppointmentID": [900001, 900002, 900003]})
+    )
+    assert [kpi["metric"] for kpi in identifier_only["kpis"]] == ["AppointmentID"]
+
+
+def test_kpis_exclude_standalone_calendar_components():
+    df = pd.DataFrame(
+        {
+            "Year": [2023, 2024, 2025],
+            "Month": [1, 2, 3],
+            "Day": [10, 11, 12],
+            "Effective Federal Funds Rate": [4.5, 4.7, 4.8],
+            "Unemployment Rate": [3.8, 3.9, 4.0],
+        }
+    )
+
+    metrics = [
+        kpi["metric"]
+        for kpi in identify_and_compute_kpis(df)["kpis"]
+    ]
+
+    assert "Year" not in metrics
+    assert "Month" not in metrics
+    assert "Day" not in metrics
+    assert metrics[:2] == ["Effective Federal Funds Rate", "Unemployment Rate"]
+
+
 def test_kpis_rejects_empty_dataframe():
     with pytest.raises(ValueError, match="empty"):
         identify_and_compute_kpis(pd.DataFrame())
